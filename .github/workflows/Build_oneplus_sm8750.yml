@@ -832,6 +832,13 @@ jobs:
             }
 
             core.info(`旧缓存清理完成，共删除 ${deleted} 个缓存`);
+      
+      - name: 📤 Upload raw Image (上传裸内核)
+        uses: actions/upload-artifact@v6
+        with:
+          name: Image_${{ env.KSUVER }}_${{ env.DEVICES_NAME }}
+          path: kernel_workspace/common/out/arch/arm64/boot/Image*
+          if-no-files-found: error
 
       - name: 📦 Make AnyKernel3 (创建Anykernel3)
         run: |
@@ -977,6 +984,11 @@ jobs:
               (cd "$rk_dir" && zip -qr "../${name}.zip" .)
             fi
           done
+
+          if [ -f ./release_assets/anykernel.sh ] && ! ls -d ./release_assets/AK3_*/ >/dev/null 2>&1; then
+            (cd ./release_assets && zip -qr "../AK3_${KSUVER}_${DEVICES_NAME}_ReSukiSU.zip" .)
+            mv "../AK3_${KSUVER}_${DEVICES_NAME}_ReSukiSU.zip" ./release_assets/
+          fi
 
           # 列出所有待上传的文件
           echo ""
