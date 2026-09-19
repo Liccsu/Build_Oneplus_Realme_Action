@@ -588,29 +588,16 @@ jobs:
           echo "正在配置SukiSU..."
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
           cd ./KernelSU
-          KSU_VERSION=$(expr $(git rev-list --count HEAD) + 40900 2>/dev/null || echo 40900)
+          # 与内核 kernel/Kbuild 的公式保持一致：VERSION_BASE(40000) + count(main) - VERSION_OFFSET(2815)
+          # 该变量仅用于产物命名；内核实际上报值由 Kbuild 自己计算，不受这里影响
+          KSU_VERSION=$(expr 40000 + $(git rev-list --count main) - 2815 2>/dev/null || echo 40922)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
       
+      # 说明：main 分支已取消 apk_sign_keys[] 数组，签名白名单改由 kernel/Kbuild 的
+      # KSU_EXPECTED_SIZE/HASH（及 KSU_EXPECTED_SIZE2/HASH2）宏在编译期注入，
+      # 因此这里不再需要 sed 插入。相关参数见下方 Build Kernel 步骤。
       
-      - name: 🔧 把自签名加入内核 manager 白名单
-        run: |
-          KS="$PWD/kernel_workspace/KernelSU/kernel/manager/apk_sign.c"
-          [ -f "$KS" ] || { echo "::error::未找到 $KS"; exit 1; }
-          KEY_HASH="ed5ada2d6e6821d88c39d9410b133c94276cefff53925984d524833b0795d56b"
-          KEY_SIZE="0x036f"
-          if grep -q "$KEY_HASH" "$KS"; then
-            echo "[skip] 已存在"
-          else
-            sed -i "/7e0c6d7278a3bb8e364e0fcba95afaf3666cf5ff3c245a3b63c8833bd0445cc4/a\\    { $KEY_SIZE, \"$KEY_HASH\" }, // Custom" "$KS"
-          fi
-          echo "--- apk_sign_keys[] ---"
-          sed -n '/apk_sign_keys\[\] = {/,/};/p' "$KS"
-          grep -q "$KEY_HASH" "$KS" || { echo "::error::自签名插入失败"; exit 1; }
-          grep -q '947ae944' "$KS"  || { echo "::error::官方 key 丢失"; exit 1; }
-          echo "[OK] 数组应为 8 项，官方 7 项完好"
-          
-            
       - name: 🔧 Set up SUSFS (配置 SUSFS) + 本地修补
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
@@ -623,16 +610,33 @@ jobs:
           cd ./common
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           patch -p1 -N -F 3 < 69_hide_stuff.patch || true
-          echo "[OK] SUSFS 补丁应用完成"
 
-          # 被拒 hunk 诊断（预期只有 zstd 无关项 + task_mmu 的冗余旧变体）
+          # 被拒 hunk 白名单（预期只有 zstd 无关项 + task_mmu 的冗余旧变体）
+          # patch 命令保留 || true，是因为上述拒绝属预期；非白名单的拒绝则必须失败，
+          # 否则会静默产出一个没有 SUSFS 的内核。
+          # 下面两项取自迁移前（builtin 内核）一次成功构建的日志；内核切到 main 后
+          # 补丁命中的文件内容有变，集合未必相同。首次运行时若报“非预期的补丁拒绝”，
+          # 把打印出来的实际路径原样替换即可（路径以 ./ 开头）。
+          ALLOW_REJ="./lib/zstd/common/portability_macros.h.rej ./fs/proc/task_mmu.c.rej"
           echo "=== 被拒 hunk 统计 ==="
-          find . -name '*.rej' -print | tee /tmp/rejlist.txt | wc -l
-          if [ -s /tmp/rejlist.txt ]; then
-            while read -r r; do echo "---- $r ----"; sed -n '1,20p' "$r"; done < /tmp/rejlist.txt
-          else
-            echo "无 .rej，两个 patch 全部干净应用"
-          fi
+          BAD=0
+          while read -r r; do
+            case " $ALLOW_REJ " in
+              *" $r "*) echo "[allow] $r  （已知冗余 hunk）" ;;
+              *) echo "::error::非预期的补丁拒绝: $r"; sed -n '1,20p' "$r"; BAD=1 ;;
+            esac
+          done < <(find . -name '*.rej' -print)
+          [ "$BAD" -eq 0 ] || exit 1
+          echo "[OK] 补丁拒绝项全部在允许清单内"
+
+          # 落地断言：50_ 补丁的关键改动必须真的存在
+          for f in fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c; do
+            grep -qE 'ksu_(su_compat_enabled|is_init_rc_hook_enabled|is_input_hook_enabled)' "$f" \
+              || { echo "::error::$f 里没有 SUSFS 的 ksu hook 引用 —— 50_ 补丁未生效"; exit 1; }
+          done
+          test -f ./include/linux/susfs.h \
+            || { echo "::error::include/linux/susfs.h 缺失 —— 50_ 补丁未生效"; exit 1; }
+          echo "[OK] SUSFS 补丁关键改动已落地"
 
           # 本地修补（static_key 类型 / post_execveat 注入），脚本自带断言
           bash "${GITHUB_WORKSPACE}/.github/workflows/tools/apply-local-fixes.sh" \
@@ -647,6 +651,9 @@ jobs:
           # echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%-Re-TG@qdykernel"' >> ./common/arch/arm64/configs/gki_defconfig
           
           if [ "${{ env.ENABLE_SUSFS }}" == 'true' ];then
+            # 注意：本 step 的 CWD 是 kernel_workspace，路径用 ./KernelSU 而非 ../KernelSU
+            grep -rq 'CONFIG_KSU_SUSFS' ./KernelSU/kernel/ \
+              || { echo "::error::SukiSU 侧没有 SUSFS Kconfig —— 拒绝写入 CONFIG_KSU_SUSFS=y"; exit 1; }
             echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -745,8 +752,30 @@ jobs:
           sudo rm -rf /usr/local/lib/android &
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig &&
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
+
+          # 断言关键配置真的进了 .config：未定义的符号会被 Kconfig 静默丢弃，
+          # 若不在这里拦住，会白跑一整轮内核编译后才产出一个缺功能的内核。
+          # 本 step 的 CWD 是 kernel_workspace/common，故路径为 out/.config。
+          for sym in CONFIG_KSU CONFIG_KPM; do
+            grep -qx "$sym=y" out/.config \
+              || { echo "::error::$sym 未生效（defconfig 未写入，或 Kconfig 里没有该符号被丢弃）"; exit 1; }
+          done
+          if [ "${{ env.ENABLE_SUSFS }}" = "true" ]; then
+            grep -qx 'CONFIG_KSU_SUSFS=y' out/.config \
+              || { echo "::error::CONFIG_KSU_SUSFS 未生效"; exit 1; }
+          fi
+          echo "[OK] 关键 CONFIG 断言通过"
+
+          # 签名白名单：主槽放自签名，第二槽保留官方，两者都能被内核认作 manager。
+          # 不要传 KSU_MANAGER_PACKAGE —— 它在两次签名比较之前做包名校验，
+          # 一旦启用，第二槽里的官方签名将永远不会被检查。
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error \
+            KSU_EXPECTED_SIZE=0x36f \
+            KSU_EXPECTED_HASH=ed5ada2d6e6821d88c39d9410b133c94276cefff53925984d524833b0795d56b \
+            KSU_EXPECTED_SIZE2=0x35c \
+            KSU_EXPECTED_HASH2=947ae944f3de4ed4c21a7e4f7953ecf351bfa2b36239da37a34111ad29993eef \
+            Image
           LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
           echo "ccache 状态："
           ccache -s
