@@ -939,7 +939,7 @@ jobs:
 
       - name: Build manager (自定义包名与显示名)
         run: |
-          cd sukisu
+          cd sukisu/manager
           ./gradlew clean assembleRelease \
             -PKSU_PACKAGE_NAME="${{ vars.KSU_PACKAGE_NAME }}" \
             -PKSU_NAME="${{ vars.KSU_NAME }}"
