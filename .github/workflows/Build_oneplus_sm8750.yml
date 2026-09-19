@@ -598,15 +598,27 @@ jobs:
       # KSU_EXPECTED_SIZE/HASH（及 KSU_EXPECTED_SIZE2/HASH2）宏在编译期注入，
       # 因此这里不再需要 sed 插入。相关参数见下方 Build Kernel 步骤。
       
-      - name: 🔧 Set up SUSFS (配置 SUSFS) + 本地修补
+      - name: 🔧 Set up SUSFS (配置 SUSFS + KernelSU 侧补丁)
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
           cd kernel_workspace
-          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android15-6.6
+          # 用 -dev 分支：它额外提供 kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch，
+          # 由该补丁在 SukiSU 侧补齐 SUSFS 依赖的 hook 符号与 Kconfig。
+          # 非 -dev 分支没有这份补丁，其 50_ 补丁引用的 ksu_* 符号在 main 版 SukiSU 上
+          # 大面积缺失（签名不同或已移除），无法靠零散 stub 解决。
+          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android15-6.6-dev
           wget https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/main/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
           cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
           cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+
+          # KernelSU 侧补丁：必须在 SukiSU 源码就位之后应用（前一步的 setup.sh 才做完 checkout）
+          patch -p1 -d ./KernelSU < ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch \
+            || { echo "::error::10_enable_susfs_for_ksu.patch 应用失败"; exit 1; }
+          grep -q 'CONFIG_KSU_SUSFS' ./KernelSU/kernel/Kconfig \
+            || { echo "::error::KernelSU 侧 Kconfig 未出现 SUSFS —— 10_ 补丁未生效"; exit 1; }
+          echo "[OK] KernelSU 侧补丁已应用"
+
           cd ./common
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           patch -p1 -N -F 3 < 69_hide_stuff.patch || true
@@ -638,10 +650,9 @@ jobs:
             || { echo "::error::include/linux/susfs.h 缺失 —— 50_ 补丁未生效"; exit 1; }
           echo "[OK] SUSFS 补丁关键改动已落地"
 
-          # 本地修补（static_key 类型 / post_execveat 注入），脚本自带断言
-          bash "${GITHUB_WORKSPACE}/.github/workflows/tools/apply-local-fixes.sh" \
-               "${GITHUB_WORKSPACE}/kernel_workspace/common" \
-               "${GITHUB_WORKSPACE}/kernel_workspace/KernelSU"
+          # 说明：原先此处调用的 apply-local-fixes.sh 已不再需要 ——
+          # static_key 类型处理、post_execveat 注入等，均已被上面的
+          # 10_enable_susfs_for_ksu.patch 在 SukiSU 侧一并解决。
 
       - name: 🔧 Set gki_defconfig (设置编译配置) 
         run: |
