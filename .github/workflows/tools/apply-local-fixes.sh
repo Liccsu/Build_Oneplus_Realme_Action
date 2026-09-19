@@ -77,8 +77,88 @@ then
 }
 
 fix_var ksu_su_compat_enabled       fs/exec.c fs/open.c fs/stat.c
-fix_var ksu_is_init_rc_hook_enabled fs/read_write.c fs/stat.c
-fix_var ksu_is_input_hook_enabled   drivers/input/input.c
+
+# ---------------------------------------------------------------------------
+# [1b] 为 SukiSU 已移除、但 SUSFS 补丁仍引用的两个 hook 开关提供 stub 定义
+#
+# main 分支已移除 init_rc / input_hook 功能（kernel/feature/ 下无对应文件，
+# runtime/ksud.c 中也不再有这两个变量），而 50_ 补丁仍以 static_key 形式引用：
+#     extern struct static_key_true ksu_is_init_rc_hook_enabled;
+#     if (static_branch_unlikely(&ksu_is_init_rc_hook_enabled))
+#         ksu_handle_sys_read(fd);
+# 缺定义会在链接期报 undefined symbol。
+#
+# 这里注入 DEFINE_STATIC_KEY_FALSE：分支被编译期消除，符号同时得到满足，
+# 行为等价于「该 hook 未启用」，与 main 移除这两个功能后的状态一致。
+# 注意不能用 DEFINE_STATIC_KEY_TRUE —— 那会让内核去调用 ksu_handle_sys_read /
+# ksu_handle_vfs_fstat，而它们在 main 上同样不存在。
+# ---------------------------------------------------------------------------
+INJECT_KEY_C="$KERNELSU_DIR/kernel/feature/sucompat.c"
+[ -f "$INJECT_KEY_C" ] || fail "未找到 $INJECT_KEY_C"
+
+inject_disabled_key() {
+    local v="$1"
+
+    if grep -rqE "DEFINE_STATIC_KEY_(TRUE|FALSE)[[:space:]]*\([[:space:]]*$v([[:space:]]|,|\))" \
+         "$KERNELSU_DIR/kernel/"; then
+        note "[skip] $v 已有 DEFINE_STATIC_KEY_* 定义"
+        return 0
+    fi
+
+    if ! grep -q 'linux/jump_label.h' "$INJECT_KEY_C"; then
+        sed -i '1i #include <linux/jump_label.h>' "$INJECT_KEY_C"
+    fi
+
+    printf '\n#ifdef CONFIG_KSU_SUSFS\nDEFINE_STATIC_KEY_FALSE(%s);\n#endif\n' "$v" \
+        >> "$INJECT_KEY_C"
+
+    grep -q "DEFINE_STATIC_KEY_FALSE($v)" "$INJECT_KEY_C" || fail "注入 $v 失败"
+    note "[ok] 已注入 $v (FALSE) -> $INJECT_KEY_C"
+}
+
+inject_disabled_key ksu_is_init_rc_hook_enabled
+inject_disabled_key ksu_is_input_hook_enabled
+
+# ---------------------------------------------------------------------------
+# [1c] 50_ 补丁引用、而 main 上无法链接的函数：
+#     ksu_handle_sys_read   —— main 里是 static 且签名不同
+#     ksu_handle_vfs_fstat  —— main 里完全没有
+#     ksu_handle_sys_reboot —— main 里完全没有。该调用点未被任何 key 守护，
+#         补丁里的调用形式是：
+#             ret = ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+#             if (ret) { goto orig_flow; }
+#             return ret;
+#         即返回 0 会被视为"已由 KSU 处理完毕"而直接返回，reboot 静默失效；
+#         必须返回非 0（用 -ENOSYS）才会跳回原生 reboot 流程。
+# 签名必须与 50_ 补丁里的 extern 声明逐字一致。
+# 其余被引用的 ksu_* 符号（input_handle_event、execveat、execveat_sucompat、
+# faccessat、setresuid、stat、__ksu_is_allow_uid_for_current、
+# ksu_selinux_hide_*）在 main 上均有非 static 定义，无需处理。
+# ---------------------------------------------------------------------------
+inject_stub_fn() {
+    local decl="$1"
+    local body="${2:-}"
+    local name
+    name=$(printf '%s' "$decl" | sed -n 's/^[a-zA-Z_][a-zA-Z_0-9]*[[:space:]]*\([a-zA-Z_][a-zA-Z_0-9]*\)[[:space:]]*(.*/\1/p')
+    [ -n "$name" ] || fail "无法从声明中解析函数名: $decl"
+
+    if grep -qE "(^|[^a-zA-Z_0-9])${name}[[:space:]]*\(" "$INJECT_KEY_C"; then
+        note "[skip] $name 已存在"
+        return 0
+    fi
+
+    if [ -n "$body" ]; then
+        printf '\n#ifdef CONFIG_KSU_SUSFS\n%s\n{\n\t%s\n}\n#endif\n' "$decl" "$body" >> "$INJECT_KEY_C"
+    else
+        printf '\n#ifdef CONFIG_KSU_SUSFS\n%s\n{\n}\n#endif\n' "$decl" >> "$INJECT_KEY_C"
+    fi
+    grep -q "${name}(" "$INJECT_KEY_C" || fail "注入 $name 失败"
+    note "[ok] 已注入 $name -> $INJECT_KEY_C"
+}
+
+inject_stub_fn 'void ksu_handle_sys_read(unsigned int fd)'
+inject_stub_fn 'void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr)'
+inject_stub_fn 'int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg)' 'return -ENOSYS;'
 
 echo "--- static_key 自检（应只剩 extern bool 与裸变量判断）---"
 sed -n '/ksu_su_compat_enabled/p;/ksu_is_init_rc_hook_enabled/p;/ksu_is_input_hook_enabled/p' \
