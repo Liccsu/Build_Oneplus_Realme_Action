@@ -94,7 +94,7 @@ jobs:
     outputs:
       ksuver: ${{ steps.ksu_step.outputs.ksuver }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: ⚙️ Set REPO_MANIFEST (设置对应机型配置文件)
@@ -258,7 +258,7 @@ jobs:
 
       - name: 📥 Restore ccache (载入当前机型的 ccache 缓存)
         id: ccache-restore
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ env.DEVICES_NAME }}${{ env.CACHE_VARIANT }}-latest
@@ -269,7 +269,7 @@ jobs:
       - name: 🔎 Find public ccache in releases (查找公共缓存)
         id: public-ccache
         if: ${{ steps.ccache-restore.outputs.cache-matched-key == '' }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PUBLIC_CACHE_REPO: ${{ vars.PUBLIC_CACHE_REPO }}
           PUBLIC_CACHE_TAG: ${{ vars.PUBLIC_CACHE_TAG }}
@@ -760,14 +760,14 @@ jobs:
 
       - name: 📥 Save ccache if needed (构建时间较长或首次落地本地缓存时保存)
         if: ${{ env.BUILD_TIME > 480 || steps.ccache-restore.outputs.cache-matched-key == '' }}
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ env.DEVICES_NAME }}${{ env.CACHE_VARIANT }}-${{ github.run_id }}
 
       - name: 🧹 Clean old ccache (清理旧缓存)
         if: env.BUILD_TIME > 480
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PREFIX: ccache-${{ env.DEVICES_NAME }}${{ env.CACHE_VARIANT }}-
           CURRENT_KEY: ccache-${{ env.DEVICES_NAME }}${{ env.CACHE_VARIANT }}-${{ github.run_id }}
@@ -847,7 +847,7 @@ jobs:
           ls -la "$BOOTDIR"
       
       - name: 📤 Upload raw Image (上传裸内核)
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: Image_${{ env.KSUVER }}_${{ env.DEVICES_NAME }}
           path: kernel_workspace/common/out/arch/arm64/boot/Image*
@@ -861,7 +861,7 @@ jobs:
           rm -rf ./main.bin
           
       - name: 📤 Upload AnyKernel3 (上传 Anykernel3)
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
          name: AK3_${{ env.KSUVER }}_${{ env.DEVICES_NAME }}_ReSukiSU
          path: ./AnyKernel3/*
@@ -870,14 +870,14 @@ jobs:
     name: 🧰 Build SukiSU Manager (自定义包名 + 自签名)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: SukiSU-Ultra/SukiSU-Ultra
           ref: main
           path: sukisu
           fetch-depth: 0                     # 版本码要完整历史，否则变成 37186
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with: { distribution: temurin, java-version: '21' }
       - uses: android-actions/setup-android@v4
 
@@ -965,7 +965,7 @@ jobs:
           echo "--- 证书 SHA-256（应含 ed5ada2d…d56b）---"
           "${BT}apksigner" verify --print-certs "$APK" | sed -n '/SHA-256/p'
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with: { name: Manager-custom, path: sukisu/dist/*.apk }
 
   upload_rekernel:
@@ -976,7 +976,7 @@ jobs:
     steps:
       - name: 🔎 Find Re-Kernel module zip (查找Re-Kernel最新模块并下载)
         id: download-rekernel
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           KERNEL_MAJOR: "6.6"
         with:
@@ -1056,14 +1056,14 @@ jobs:
           ls -lR "$ARTIFACT_NAME"
 
       - name: 📤 Upload Re-Kernel module (上传 Re-Kernel 模块)
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: Re-Kernel-v${{ steps.download-rekernel.outputs.version-number }}
           path: Re-Kernel-v${{ steps.download-rekernel.outputs.version-number }}
 
   release:
     name: 📤 Create Release (创建发布)
-    needs: [build, upload_rekernel]
+    needs: [build, build_manager, upload_rekernel]
     if: ${{ github.event.inputs.enable_release == 'true' && always() && needs.build.result != 'failure' }}
     runs-on: ubuntu-latest
     permissions:
@@ -1071,7 +1071,7 @@ jobs:
       actions: read
     steps:
       - name: 📥 Download all artifacts (下载所有构建产物)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: "*"
           path: ./release_assets
@@ -1104,6 +1104,9 @@ jobs:
             (cd ./release_assets && zip -qr "../AK3_${KSUVER}_${DEVICES_NAME}_ReSukiSU.zip" .)
             mv "../AK3_${KSUVER}_${DEVICES_NAME}_ReSukiSU.zip" ./release_assets/
           fi
+
+          # Manager APK 落在 ./release_assets/<artifact名>/ 下，展平到根层
+          mv -f ./release_assets/Manager-custom/*.apk ./release_assets/
 
           # 列出所有待上传的文件
           echo ""
@@ -1143,7 +1146,7 @@ jobs:
           if [ "${{ github.event.inputs.enable_droidspaces }}" = "true" ]; then
             FEATURES="${FEATURES}- ✅ Droidspaces 容器支持"$'\n'
           fi
-          FEATURES="${FEATURES}- ✅ ReSukiSU (KernelSU)"$'\n'
+          FEATURES="${FEATURES}- ✅ (Re)SukiSU (KernelSU)"$'\n'
           if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
             FEATURES="${FEATURES}- ✅ SUSFS 挂载支持"$'\n'
           fi
@@ -1165,7 +1168,7 @@ jobs:
           ### 📱 SM8750 欧加真通用内核 | 构建信息
 
           - **内核版本**: SM8750 (Android 15 / 6.6)
-          - **ReSukiSU 版本**: ${KSU_VER}
+          - **(Re)SukiSU 版本**: ${KSU_VER}
           - **编译时间**: ${TIME_FORM}
           - **编译机型**: ${DEVICE_NAME}
           - **内核后缀**: ${KERNEL_SUFFIX}
@@ -1179,12 +1182,12 @@ jobs:
           ${FEATURES}
           ### ⏫️ 更新内容
 
-          - 更新 ReSukiSU 至最新版本 (${KSU_VER})
+          - 更新 (Re)SukiSU 至最新版本 (${KSU_VER})
           - 同步上游内核源码
 
           ### 📋 安装方法 | Installation Guide
 
-          1. 若你已刷入 ReSukiSU 内核，且 ReSukiSU 管理器已更新至最新版本，可在管理器中直接刷入 AnyKernel 刷机包并重启；
+          1. 若你已刷入 (Re)SukiSU 内核，且 (Re)SukiSU 管理器已更新至最新版本，可在管理器中直接刷入 AnyKernel 刷机包并重启；
           2. 由于 KernelSU 上游更新了元模块功能，最新版 KSU 管理器需要配合元模块 (metamodule) 才能正常挂载模块。目前的元模块包括 [meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/) 等。若你是第一次使用 KSU 或刚从旧版 KSU 管理器升级至新版，请先安装一个元模块；
           3. 若启用 Re-Kernel，需刷入配套Re-Kernel模块并配合 NoActive 软件使用，以提升后台冻结能力。
 
@@ -1203,8 +1206,8 @@ jobs:
           cat release_notes.md
           echo ""
 
-          # 收集所有待上传的文件（仅 AK3 zip 和 Re-Kernel zip）
-          RELEASE_FILES=$(find ./release_assets -maxdepth 1 -type f \( -name 'AK3_*.zip' -o -name 'Re-Kernel-v*.zip' \) 2>/dev/null || true)
+          # 收集所有待上传的文件（AK3 zip / Re-Kernel zip / Manager APK）
+          RELEASE_FILES=$(find ./release_assets -maxdepth 1 -type f \( -name 'AK3_*.zip' -o -name 'Re-Kernel-v*.zip' -o -name '*.apk' -o -name 'Image_*' \) 2>/dev/null || true)
 
           if [ -z "$RELEASE_FILES" ]; then
             echo "::warning::没有找到待上传的发布文件"
