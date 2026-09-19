@@ -881,6 +881,20 @@ jobs:
         with: { distribution: temurin, java-version: '21' }
       - uses: android-actions/setup-android@v4
 
+      - name: 🔧 替换已失效的 Kernel-SU 依赖为 ReSukiSU 镜像
+        run: |
+          cd "${GITHUB_WORKSPACE}/sukisu"
+          # 只改 URL 主机路径,sha/rev/branch 一律保留
+          find . -type f \( -name '*.toml' -o -name 'Cargo.lock' \) -print0 \
+            | xargs -0 sed -i 's|github\.com/Kernel-SU/|github.com/ReSukiSU/|g'
+          find . -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 \
+            | xargs -0 sed -i 's|Kernel-SU/actions-comment-on-issue|ReSukiSU/actions-comment-on-issue|g'
+          echo "--- 自检:以下应无输出 ---"
+          grep -rn 'Kernel-SU' . --include='*.toml' --include='*.lock' --include='*.yml' --include='*.yaml' \
+            || echo "[ok] 零残留"
+          echo "--- 确认 sha 未变 ---"
+          grep -rn 'git+https' ./Cargo.lock
+
       - uses: dtolnay/rust-toolchain@stable
       - name: Add rust targets
         run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
@@ -898,7 +912,7 @@ jobs:
           cd sukisu
           for t in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
             echo "===== building $t ====="
-            source .github/scripts/setup-rust-build.sh "$t" 26     # ★ 官方脚本，导出 CARGO_TARGET_*_LINKER 等
+            source .github/scripts/setup-rust-build.sh "$t" 26     # 官方脚本，导出 CARGO_TARGET_*_LINKER 等
             cargo build --target "$t" --release --manifest-path ./userspace/ksud/Cargo.toml
           done
           echo "--- 产物（repack 就按这个路径找）---"
