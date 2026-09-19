@@ -586,7 +586,7 @@ jobs:
           # cd ./KernelSU 
           # KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
           echo "正在配置SukiSU..."
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
           cd ./KernelSU
           KSU_VERSION=$(expr $(git rev-list --count HEAD) + 40900 2>/dev/null || echo 40900)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
