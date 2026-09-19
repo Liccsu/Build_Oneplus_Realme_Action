@@ -591,6 +591,29 @@ jobs:
           KSU_VERSION=$(expr $(git rev-list --count HEAD) + 40900 2>/dev/null || echo 40900)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+      
+      
+      - name: 🔧 把自签名加入内核 manager 白名单
+        run: |
+          KS="$PWD/kernel_workspace/KernelSU/kernel/manager/apk_sign.c"
+          [ -f "$KS" ] || { echo "::error::未找到 $KS"; exit 1; }
+
+          KEY_HASH="ed5ada2d6e6821d88c39d9410b133c94276cefff53925984d524833b0795d56b"
+          KEY_SIZE="0x036f"
+
+          if grep -q "$KEY_HASH" "$KS"; then
+            echo "[skip] 白名单已含自签名"
+          else
+            # 以 MKSU 那行（数组最后一项）为锚点，在其后插入
+            sed -i "/7e0c6d7278a3bb8e364e0fcba95afaf3666cf5ff3c245a3b63c8833bd0445cc4/a\\    { $KEY_SIZE, \"$KEY_HASH\" }, // Custom" "$KS"
+          fi
+
+          # 自检（硬断言，任一不成立就失败）
+          echo "--- apk_sign_keys[] ---"
+          sed -n '/apk_sign_keys\[\] = {/,/};/p' "$KS"
+          grep -q "$KEY_HASH" "$KS"  || { echo "::error::自签名插入失败"; exit 1; }
+          grep -q '947ae944' "$KS"   || { echo "::error::官方 SukiSU key 丢失"; exit 1; }
+          echo "[OK] 自签名已插入，官方 key 完好（数组应为 8 项）"
           
             
       - name: 🔧 Set up SUSFS (配置 SUSFS) + 本地修补
@@ -847,6 +870,77 @@ jobs:
         with:
          name: AK3_${{ env.KSUVER }}_${{ env.DEVICES_NAME }}_ReSukiSU
          path: ./AnyKernel3/*
+  
+  build_manager:
+    name: 🧰 Build SukiSU Manager (自定义包名 + 自签名)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: SukiSU-Ultra/SukiSU-Ultra
+          ref: main
+          path: sukisu
+          fetch-depth: 0                     # 必须：否则 rev-list --count=1 → versionCode 变成 37186
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - uses: android-actions/setup-android@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android }
+
+      - name: Build ksud (三架构)
+        run: |
+          cd sukisu/userspace/ksud
+          for t in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
+            cargo build --release --target "$t"
+          done
+
+      - name: Prepare signing env (设置环境变量)
+        run: |
+          cd sukisu
+          echo "${{ secrets.KSU_KEYSTORE_B64 }}" | base64 -d > pr-key.jks
+          echo "KEYSTORE_FILE=$PWD/pr-key.jks"                                          >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=${{ secrets.KSU_KEYSTORE_PASSWORD }}"                 >> $GITHUB_ENV
+          echo "KEY_ALIAS=ksu-manager"                                                  >> $GITHUB_ENV
+          echo "KEY_PASSWORD=${{ secrets.KSU_KEYSTORE_PASSWORD }}"                      >> $GITHUB_ENV
+          echo "ORG_GRADLE_PROJECT_KEYSTORE_FILE=$PWD/pr-key.jks"                       >> $GITHUB_ENV
+          echo "ORG_GRADLE_PROJECT_KEYSTORE_PASSWORD=${{ secrets.KSU_KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+          echo "ORG_GRADLE_PROJECT_KEY_ALIAS=ksu-manager"                               >> $GITHUB_ENV
+          echo "ORG_GRADLE_PROJECT_KEY_PASSWORD=${{ secrets.KSU_KEYSTORE_PASSWORD }}"   >> $GITHUB_ENV
+          echo "SIGN_KEYSTORE_FILE=$PWD/pr-key.jks"                                     >> $GITHUB_ENV
+          echo "SIGN_KEY_ALIAS=ksu-manager"                                             >> $GITHUB_ENV
+          echo "SIGN_KEYSTORE_PASSWORD=${{ secrets.KSU_KEYSTORE_PASSWORD }}"            >> $GITHUB_ENV
+          echo "SIGN_KEY_PASSWORD=${{ secrets.KSU_KEYSTORE_PASSWORD }}"                 >> $GITHUB_ENV
+
+      - name: Build manager (自定义包名与显示名)
+        run: |
+          cd sukisu
+          ./gradlew clean assembleRelease \
+            -PKSU_PACKAGE_NAME="${{ vars.KSU_PACKAGE_NAME }}" \
+            -PKSU_NAME="${{ vars.KSU_NAME }}"
+
+      - name: Repack (注入 ksud + zipalign + 重签)
+        run: |
+          cd sukisu
+          python3 repack_apk.py repack \
+            -b release -t release \
+            -a arm64-v8a -a armeabi-v7a -a x86_64 \
+            -K "$SIGN_KEYSTORE_FILE" -A "$SIGN_KEY_ALIAS" \
+            -P "$SIGN_KEYSTORE_PASSWORD" -S "$SIGN_KEY_PASSWORD" \
+            -o "$PWD/dist"
+
+      - name: 自检（包名 / 版本码 / 证书哈希）
+        run: |
+          cd sukisu
+          APK=$(find dist -name '*.apk' | head -n1); echo "APK=$APK"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | tail -n1)
+          echo "--- 包名与版本码 ---"
+          "${BT}aapt2" dump badging "$APK" | sed -n '/package:/p'
+          echo "--- 证书 SHA-256（应等于 ed5ada2d…d56b）---"
+          "${BT}apksigner" verify --print-certs "$APK" | sed -n '/SHA-256/p'
+
+      - uses: actions/upload-artifact@v6
+        with: { name: Manager-custom, path: sukisu/dist/*.apk }
 
   upload_rekernel:
     name: Upload Re-Kernel Module
