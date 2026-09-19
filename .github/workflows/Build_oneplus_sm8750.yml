@@ -577,7 +577,7 @@ jobs:
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/lockdown/lockdown,baseband_guard/ } }' ./security/Kconfig
 
           
-      - name: ⚙️ Set ReSukiSU (设置ReSukiSU)
+      - name: ⚙️ Set (Re)SukiSU (设置(Re)SukiSU)
         id: ksu_step
         run: |
           cd kernel_workspace
@@ -593,7 +593,7 @@ jobs:
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
           
             
-      - name: 🔧 Set up SUSFS (配置 SUSFS)
+      - name: 🔧 Set up SUSFS (配置 SUSFS) + 本地修补
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
           cd kernel_workspace
@@ -605,57 +605,21 @@ jobs:
           cd ./common
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
           patch -p1 -N -F 3 < 69_hide_stuff.patch || true
-          echo "[OK] SUSFS 补丁处理流程全部完成"
+          echo "[OK] SUSFS 补丁应用完成"
 
-          # === [0] 诊断：列出被拒的 hunk（决定后续 sed 是否空转、SUSFS 是否只部分生效） ===
+          # 被拒 hunk 诊断（预期只有 zstd 无关项 + task_mmu 的冗余旧变体）
           echo "=== 被拒 hunk 统计 ==="
           find . -name '*.rej' -print | tee /tmp/rejlist.txt | wc -l
           if [ -s /tmp/rejlist.txt ]; then
-            echo "以下文件有 hunk 未应用（内容见 Artifacts 或下方）:"
-            while read -r r; do
-              echo "---- $r ----"
-              sed -n '1,25p' "$r"
-            done < /tmp/rejlist.txt
+            while read -r r; do echo "---- $r ----"; sed -n '1,20p' "$r"; done < /tmp/rejlist.txt
           else
             echo "无 .rej，两个 patch 全部干净应用"
           fi
 
-          # === [A][B] 修正 static_key 类型混用（按文件×变量精确定位） ===
-          fix_var() {
-            v="$1"; shift
-            echo "===== $v ====="
-            grep -rn "$v" ../KernelSU/kernel/ 2>/dev/null | head -3 || true
-            if grep -rqs "bool $v" ../KernelSU/kernel/; then
-              echo "[FIX] $v 在 SukiSU 侧是 bool -> 内核侧退化为裸变量判断"
-              for f in "$@"; do
-                [ -f "$f" ] || { echo "  [SKIP] $f 不存在"; continue; }
-                sed -i "s/extern struct static_key_true $v;/extern bool $v;/" "$f"
-                sed -i "s/static_branch_likely(&$v)/($v)/; s/static_branch_unlikely(&$v)/($v)/" "$f"
-                echo "  [OK] $f"
-              done
-            else
-              echo "[KEEP] $v 未见 bool 定义，保持 static_branch 原样"
-            fi
-          }
-          fix_var ksu_su_compat_enabled       fs/exec.c fs/open.c fs/stat.c
-          fix_var ksu_is_init_rc_hook_enabled fs/read_write.c fs/stat.c
-          fix_var ksu_is_input_hook_enabled   drivers/input/input.c
-
-          echo "--- 自检：以下应只剩 extern bool 与裸变量，不应再出现 static_branch_*(&ksu_...) ---"
-          sed -n '/ksu_su_compat_enabled/p;/ksu_is_init_rc_hook_enabled/p;/ksu_is_input_hook_enabled/p' \
-            fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
-
-          # === [C] 补上 SukiSU 缺失的 post_execveat 钩子 ===
-          SC=$(find .. -maxdepth 5 -path '*KernelSU/kernel/feature/sucompat.c' | head -n1)
-          echo "[INFO] sucompat.c = ${SC:-未找到}"
-          if [ -z "$SC" ]; then echo "::error::未找到 sucompat.c"; exit 1; fi
-          if grep -q 'ksu_handle_post_execveat_sucompat' "$SC"; then
-            echo "[SKIP] 符号已存在"
-          else
-            printf '\n#ifdef CONFIG_KSU_SUSFS\nint ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr,\n\t\t\t\t      void *argv_user, void *envp_user,\n\t\t\t\t      int *__never_use_flags, int *retval)\n{\n\treturn 0;\n}\n#endif\n' >> "$SC"
-            echo "[OK] 已注入 ksu_handle_post_execveat_sucompat"
-          fi
-          grep -n 'ksu_handle_post_execveat_sucompat' "$SC"
+          # 本地修补（static_key 类型 / post_execveat 注入），脚本自带断言
+          bash "${GITHUB_WORKSPACE}/.github/workflows/tools/apply-local-fixes.sh" \
+               "${GITHUB_WORKSPACE}/kernel_workspace/common" \
+               "${GITHUB_WORKSPACE}/kernel_workspace/KernelSU"
 
       - name: 🔧 Set gki_defconfig (设置编译配置) 
         run: |
@@ -832,6 +796,37 @@ jobs:
             }
 
             core.info(`旧缓存清理完成，共删除 ${deleted} 个缓存`);
+      
+      - name: 🔧 Integrate KernelPatch runtime (为 KPM 提供真实实现)
+        run: |
+          cd kernel_workspace
+          KP_VER=0.13.0
+          BASE="https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/${KP_VER}"
+          curl -sL --retry 3 -o kptools "${BASE}/kptools-linux"
+          curl -sL --retry 3 -o kpimg   "${BASE}/kpimg"
+          chmod +x kptools
+          ls -la kptools kpimg
+
+          BOOTDIR="common/out/arch/arm64/boot"
+          SIZE_BEFORE=$(stat -c%s "$BOOTDIR/Image")
+          cp "$BOOTDIR/Image" "$BOOTDIR/Image.orig"
+
+          # 不要用默认 superkey 123
+          ./kptools -p -s "SuKi$(date +%s | tail -c 9)" \
+            -i "$BOOTDIR/Image" -k "$PWD/kpimg" -o "$BOOTDIR/Image.new"
+          RC=$?
+          SIZE_AFTER=$(stat -c%s "$BOOTDIR/Image.new" 2>/dev/null || echo 0)
+          echo "kptools rc=$RC  注入前=$SIZE_BEFORE  注入后=$SIZE_AFTER"
+
+          if [ "$RC" -ne 0 ] || [ "$SIZE_AFTER" -le "$SIZE_BEFORE" ]; then
+            echo "::error::KernelPatch 注入失败（rc=$RC, $SIZE_BEFORE -> $SIZE_AFTER）"
+            exit 1
+          fi
+
+          # 原地替换；不要留 Image.new 在同目录，否则 Image* 通配会匹配到两个文件
+          mv -f "$BOOTDIR/Image.new" "$BOOTDIR/Image"
+          rm -f "$BOOTDIR/Image.orig"
+          ls -la "$BOOTDIR"
       
       - name: 📤 Upload raw Image (上传裸内核)
         uses: actions/upload-artifact@v6
