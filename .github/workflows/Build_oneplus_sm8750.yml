@@ -597,23 +597,18 @@ jobs:
         run: |
           KS="$PWD/kernel_workspace/KernelSU/kernel/manager/apk_sign.c"
           [ -f "$KS" ] || { echo "::error::未找到 $KS"; exit 1; }
-
           KEY_HASH="ed5ada2d6e6821d88c39d9410b133c94276cefff53925984d524833b0795d56b"
           KEY_SIZE="0x036f"
-
           if grep -q "$KEY_HASH" "$KS"; then
-            echo "[skip] 白名单已含自签名"
+            echo "[skip] 已存在"
           else
-            # 以 MKSU 那行（数组最后一项）为锚点，在其后插入
             sed -i "/7e0c6d7278a3bb8e364e0fcba95afaf3666cf5ff3c245a3b63c8833bd0445cc4/a\\    { $KEY_SIZE, \"$KEY_HASH\" }, // Custom" "$KS"
           fi
-
-          # 自检（硬断言，任一不成立就失败）
           echo "--- apk_sign_keys[] ---"
           sed -n '/apk_sign_keys\[\] = {/,/};/p' "$KS"
-          grep -q "$KEY_HASH" "$KS"  || { echo "::error::自签名插入失败"; exit 1; }
-          grep -q '947ae944' "$KS"   || { echo "::error::官方 SukiSU key 丢失"; exit 1; }
-          echo "[OK] 自签名已插入，官方 key 完好（数组应为 8 项）"
+          grep -q "$KEY_HASH" "$KS" || { echo "::error::自签名插入失败"; exit 1; }
+          grep -q '947ae944' "$KS"  || { echo "::error::官方 key 丢失"; exit 1; }
+          echo "[OK] 数组应为 8 项，官方 7 项完好"
           
             
       - name: 🔧 Set up SUSFS (配置 SUSFS) + 本地修补
@@ -880,22 +875,38 @@ jobs:
           repository: SukiSU-Ultra/SukiSU-Ultra
           ref: main
           path: sukisu
-          fetch-depth: 0                     # 必须：否则 rev-list --count=1 → versionCode 变成 37186
+          fetch-depth: 0                     # 版本码要完整历史，否则变成 37186
 
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '21' }
       - uses: android-actions/setup-android@v4
+
       - uses: dtolnay/rust-toolchain@stable
-        with: { targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android }
+      - name: Add rust targets
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29
 
       - name: Build ksud (三架构)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          KSU_PACKAGE_NAME: ${{ vars.KSU_PACKAGE_NAME }}   # ksud 编译期也要这个常量
         run: |
-          cd sukisu/userspace/ksud
+          cd sukisu
           for t in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
-            cargo build --release --target "$t"
+            echo "===== building $t ====="
+            source .github/scripts/setup-rust-build.sh "$t" 26     # ★ 官方脚本，导出 CARGO_TARGET_*_LINKER 等
+            cargo build --target "$t" --release --manifest-path ./userspace/ksud/Cargo.toml
           done
+          echo "--- 产物（repack 就按这个路径找）---"
+          ls -la target/aarch64-linux-android/release/ksud
+          ls -la target/armv7-linux-androideabi/release/ksud
+          ls -la target/x86_64-linux-android/release/ksud
 
-      - name: Prepare signing env (设置环境变量)
+      - name: Prepare signing env (不用 -P，避免密码进进程参数)
         run: |
           cd sukisu
           echo "${{ secrets.KSU_KEYSTORE_B64 }}" | base64 -d > pr-key.jks
@@ -928,15 +939,16 @@ jobs:
             -K "$SIGN_KEYSTORE_FILE" -A "$SIGN_KEY_ALIAS" \
             -P "$SIGN_KEYSTORE_PASSWORD" -S "$SIGN_KEY_PASSWORD" \
             -o "$PWD/dist"
+          ls -la "$PWD/dist"
 
       - name: 自检（包名 / 版本码 / 证书哈希）
         run: |
           cd sukisu
           APK=$(find dist -name '*.apk' | head -n1); echo "APK=$APK"
           BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | tail -n1)
-          echo "--- 包名与版本码 ---"
+          echo "--- 包名与版本码（versionCode 应与内核的 40922 相同）---"
           "${BT}aapt2" dump badging "$APK" | sed -n '/package:/p'
-          echo "--- 证书 SHA-256（应等于 ed5ada2d…d56b）---"
+          echo "--- 证书 SHA-256（应含 ed5ada2d…d56b）---"
           "${BT}apksigner" verify --print-certs "$APK" | sed -n '/SHA-256/p'
 
       - uses: actions/upload-artifact@v6
