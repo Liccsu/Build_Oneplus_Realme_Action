@@ -894,6 +894,21 @@ jobs:
             || echo "[ok] 零残留"
           echo "--- 确认 sha 未变 ---"
           grep -rn 'git+https' ./Cargo.lock
+      
+      - name: 🩹 修补上游 main 的启动崩溃（无内核时 NPE）
+        run: |
+          cd "${GITHUB_WORKSPACE}/sukisu"
+          F=manager/app/src/main/java/com/sukisu/ultra/ui/MainActivity.kt
+
+          if grep -q 'val isFullFeatured = Natives\.isFullFeatured()' "$F"; then
+            sed -i 's|val isFullFeatured = Natives\.isFullFeatured()|val isFullFeatured = Natives.isManager \&\& Natives.isFullFeatured()|' "$F"
+            echo "[patched] 已补上 isManager 短路保护"
+          else
+            echo "[skip] 目标写法不存在 —— 上游已修或已换写法，本次不修改"
+          fi
+
+          echo "--- 当前状态 ---"
+          grep -n 'isFullFeatured' "$F"
 
       - uses: dtolnay/rust-toolchain@stable
       - name: Add rust targets
@@ -1107,6 +1122,8 @@ jobs:
 
           # Manager APK 落在 ./release_assets/<artifact名>/ 下，展平到根层
           mv -f ./release_assets/Manager-custom/*.apk ./release_assets/
+          # 裸 Image 同样落在 artifact 子目录里，展平到根层
+          mv -f ./release_assets/Image_*/* ./release_assets/ 2>/dev/null || true
 
           # 列出所有待上传的文件
           echo ""
@@ -1207,7 +1224,7 @@ jobs:
           echo ""
 
           # 收集所有待上传的文件（AK3 zip / Re-Kernel zip / Manager APK）
-          RELEASE_FILES=$(find ./release_assets -maxdepth 1 -type f \( -name 'AK3_*.zip' -o -name 'Re-Kernel-v*.zip' -o -name '*.apk' -o -name 'Image_*' \) 2>/dev/null || true)
+          RELEASE_FILES=$(find ./release_assets -maxdepth 1 -type f \( -name 'AK3_*.zip' -o -name 'Re-Kernel-v*.zip' -o -name '*.apk' -o -name 'Image*' \) 2>/dev/null || true)
 
           if [ -z "$RELEASE_FILES" ]; then
             echo "::warning::没有找到待上传的发布文件"
