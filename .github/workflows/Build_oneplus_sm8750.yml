@@ -586,11 +586,14 @@ jobs:
           # cd ./KernelSU 
           # KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
           echo "正在配置SukiSU..."
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+          # 改用本 fork 的 susfs-support 分支：SUSFS 所需的 KernelSU 侧改动
+          # （hook 接口、Kconfig、sulog 等）已永久落地在该分支，
+          # 不再需要 susfs4oki 的 10_enable_susfs_for_ksu.patch。
+          curl -LSs "https://raw.githubusercontent.com/Liccsu/SukiSU-Ultra/susfs-support/kernel/setup.sh" | bash -s susfs-support
           cd ./KernelSU
-          # 与内核 kernel/Kbuild 的公式保持一致：VERSION_BASE(40000) + count(main) - VERSION_OFFSET(2815)
+          # 与内核 kernel/Kbuild 的公式保持一致：VERSION_BASE(40000) + count - VERSION_OFFSET(2815)
           # 该变量仅用于产物命名；内核实际上报值由 Kbuild 自己计算，不受这里影响
-          KSU_VERSION=$(expr 40000 + $(git rev-list --count main) - 2815 2>/dev/null || echo 40922)
+          KSU_VERSION=$(expr 40000 + $(git rev-list --count susfs-support) - 2815 2>/dev/null || echo 40925)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
       
@@ -602,22 +605,19 @@ jobs:
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
           cd kernel_workspace
-          # 用 -dev 分支：它额外提供 kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch，
-          # 由该补丁在 SukiSU 侧补齐 SUSFS 依赖的 hook 符号与 Kconfig。
-          # 非 -dev 分支没有这份补丁，其 50_ 补丁引用的 ksu_* 符号在 main 版 SukiSU 上
-          # 大面积缺失（签名不同或已移除），无法靠零散 stub 解决。
+          # 用 -dev 分支：提供内核侧 50_ 补丁与 fs/、include/linux/ 源文件。
+          # KernelSU 侧的 hook 符号与 Kconfig 改动已永久落地在上一步拉取的
+          # susfs-support 分支，无需再应用其 10_enable_susfs_for_ksu.patch。
           git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android15-6.6-dev
           wget https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/main/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
           cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
           cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
 
-          # KernelSU 侧补丁：必须在 SukiSU 源码就位之后应用（前一步的 setup.sh 才做完 checkout）
-          patch -p1 -d ./KernelSU < ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch \
-            || { echo "::error::10_enable_susfs_for_ksu.patch 应用失败"; exit 1; }
+          # KernelSU 侧改动已随 susfs-support 分支落地，仅断言 SUSFS Kconfig 就位
           grep -q 'CONFIG_KSU_SUSFS' ./KernelSU/kernel/Kconfig \
-            || { echo "::error::KernelSU 侧 Kconfig 未出现 SUSFS —— 10_ 补丁未生效"; exit 1; }
-          echo "[OK] KernelSU 侧补丁已应用"
+            || { echo "::error::KernelSU 侧 Kconfig 未出现 SUSFS —— susfs-support 分支未生效"; exit 1; }
+          echo "[OK] KernelSU 侧 SUSFS 支持已就位"
 
           cd ./common
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
@@ -651,8 +651,8 @@ jobs:
           echo "[OK] SUSFS 补丁关键改动已落地"
 
           # 说明：原先此处调用的 apply-local-fixes.sh 已不再需要 ——
-          # static_key 类型处理、post_execveat 注入等，均已被上面的
-          # 10_enable_susfs_for_ksu.patch 在 SukiSU 侧一并解决。
+          # static_key 类型处理、post_execveat 注入等，均已随
+          # susfs-support 分支在 SukiSU 侧一并解决。
 
       - name: 🔧 Set gki_defconfig (设置编译配置) 
         run: |
