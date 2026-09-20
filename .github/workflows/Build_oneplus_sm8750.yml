@@ -591,9 +591,10 @@ jobs:
           # 不再需要 susfs4oki 的 10_enable_susfs_for_ksu.patch。
           curl -LSs "https://raw.githubusercontent.com/Liccsu/SukiSU-Ultra/susfs-support/kernel/setup.sh" | bash -s susfs-support
           cd ./KernelSU
-          # 与内核 kernel/Kbuild 的公式保持一致：VERSION_BASE(40000) + count - VERSION_OFFSET(2815)
-          # 该变量仅用于产物命名；内核实际上报值由 Kbuild 自己计算，不受这里影响
-          KSU_VERSION=$(expr 40000 + $(git rev-list --count susfs-support) - 2815 2>/dev/null || echo 40926)
+          # 与内核 kernel/Kbuild 的公式保持一致：VERSION_BASE(40000) + count(main) - VERSION_OFFSET(2815)。
+          # Kbuild 的 REPO_BRANCH 固定为 main（上游镜像分支），内核实际上报值按 main 计数，
+          # 产物命名用同一分支计数，与 manager versionCode（同样取自上游 main）保持一致。
+          KSU_VERSION=$(expr 40000 + $(git rev-list --count main) - 2815 2>/dev/null || echo 40922)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
       
