@@ -586,15 +586,15 @@ jobs:
           # cd ./KernelSU 
           # KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
           echo "正在配置SukiSU..."
-          # 改用本 fork 的 susfs-support 分支：SUSFS 所需的 KernelSU 侧改动
+          # 改用本 fork 的 main 分支：SUSFS 所需的 KernelSU 侧改动
           # （hook 接口、Kconfig、sulog 等）已永久落地在该分支，
           # 不再需要 susfs4oki 的 10_enable_susfs_for_ksu.patch。
-          curl -LSs "https://raw.githubusercontent.com/Liccsu/SukiSU-Ultra/susfs-support/kernel/setup.sh" | bash -s susfs-support
+          curl -LSs "https://raw.githubusercontent.com/Liccsu/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
           cd ./KernelSU
           # 与内核 kernel/Kbuild 的公式保持一致：VERSION_BASE(40000) + count(main) - VERSION_OFFSET(2815)。
-          # Kbuild 的 REPO_BRANCH 固定为 main（上游镜像分支），内核实际上报值按 main 计数，
-          # 产物命名用同一分支计数，与 manager versionCode（同样取自上游 main）保持一致。
-          KSU_VERSION=$(expr 40000 + $(git rev-list --count main) - 2815 2>/dev/null || echo 40922)
+          # Kbuild 的 REPO_OWNER 已指向本 fork，内核实际上报值按本仓库 main 分支计数，
+          # 产物命名与 manager versionCode（同样取自本仓库 main）保持一致。
+          KSU_VERSION=$(expr 40000 + $(git rev-list --count main) - 2815 2>/dev/null || echo 40929)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
       
@@ -608,17 +608,17 @@ jobs:
           cd kernel_workspace
           # 用 -dev 分支：提供内核侧 50_ 补丁与 fs/、include/linux/ 源文件。
           # KernelSU 侧的 hook 符号与 Kconfig 改动已永久落地在上一步拉取的
-          # susfs-support 分支，无需再应用其 10_enable_susfs_for_ksu.patch。
+          # main 分支，无需再应用其 10_enable_susfs_for_ksu.patch。
           git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android15-6.6-dev
           wget https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/main/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
           cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
           cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
 
-          # KernelSU 侧改动已随 susfs-support 分支落地，仅断言 SUSFS Kconfig 就位
+          # KernelSU 侧改动已随 main 分支落地，仅断言 SUSFS Kconfig 就位
           # （Kconfig 语法形式为 `config KSU_SUSFS`，不带 CONFIG_ 前缀）
           grep -q 'config KSU_SUSFS' ./KernelSU/kernel/Kconfig \
-            || { echo "::error::KernelSU 侧 Kconfig 未出现 SUSFS —— susfs-support 分支未生效"; exit 1; }
+            || { echo "::error::KernelSU 侧 Kconfig 未出现 SUSFS —— main 分支未生效"; exit 1; }
           echo "[OK] KernelSU 侧 SUSFS 支持已就位"
 
           cd ./common
@@ -654,7 +654,7 @@ jobs:
 
           # 说明：原先此处调用的 apply-local-fixes.sh 已不再需要 ——
           # static_key 类型处理、post_execveat 注入等，均已随
-          # susfs-support 分支在 SukiSU 侧一并解决。
+          # main 分支在 SukiSU 侧一并解决。
 
       - name: 🔧 Set gki_defconfig (设置编译配置) 
         run: |
@@ -914,10 +914,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          repository: SukiSU-Ultra/SukiSU-Ultra
+          repository: Liccsu/SukiSU-Ultra
           ref: main
           path: sukisu
-          fetch-depth: 0                     # 版本码要完整历史，否则变成 37186
+          fetch-depth: 0                     # 版本码要完整历史，否则计数出错
 
       - uses: actions/setup-java@v6
         with: { distribution: temurin, java-version: '21' }
@@ -1017,7 +1017,7 @@ jobs:
           cd sukisu
           APK=$(find dist -name '*.apk' | head -n1); echo "APK=$APK"
           BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | tail -n1)
-          echo "--- 包名与版本码（versionCode 应与内核的 40922 相同）---"
+          echo "--- 包名与版本码（与内核一致，均按本仓库 main 分支计数）---"
           "${BT}aapt2" dump badging "$APK" | sed -n '/package:/p'
           echo "--- 证书 SHA-256（应含 ed5ada2d…d56b）---"
           "${BT}apksigner" verify --print-certs "$APK" | sed -n '/SHA-256/p'
