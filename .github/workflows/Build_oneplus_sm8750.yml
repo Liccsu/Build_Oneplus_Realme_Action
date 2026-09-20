@@ -593,7 +593,7 @@ jobs:
           cd ./KernelSU
           # 与内核 kernel/Kbuild 的公式保持一致：VERSION_BASE(40000) + count - VERSION_OFFSET(2815)
           # 该变量仅用于产物命名；内核实际上报值由 Kbuild 自己计算，不受这里影响
-          KSU_VERSION=$(expr 40000 + $(git rev-list --count susfs-support) - 2815 2>/dev/null || echo 40925)
+          KSU_VERSION=$(expr 40000 + $(git rev-list --count susfs-support) - 2815 2>/dev/null || echo 40926)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
       
@@ -615,7 +615,8 @@ jobs:
           cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
 
           # KernelSU 侧改动已随 susfs-support 分支落地，仅断言 SUSFS Kconfig 就位
-          grep -q 'CONFIG_KSU_SUSFS' ./KernelSU/kernel/Kconfig \
+          # （Kconfig 语法形式为 `config KSU_SUSFS`，不带 CONFIG_ 前缀）
+          grep -q 'config KSU_SUSFS' ./KernelSU/kernel/Kconfig \
             || { echo "::error::KernelSU 侧 Kconfig 未出现 SUSFS —— susfs-support 分支未生效"; exit 1; }
           echo "[OK] KernelSU 侧 SUSFS 支持已就位"
 
